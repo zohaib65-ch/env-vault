@@ -10,12 +10,13 @@ import { decryptSecret, encryptSecret, variableContext } from "@/lib/crypto"
 import { logActivity } from "@/lib/dal/activity"
 import { requireUser } from "@/lib/dal/auth"
 import { getOwnedProject, touchProject } from "@/lib/dal/projects"
-import { verifyUserPasscode } from "@/lib/dal/security"
+import { verifyUnlock } from "@/lib/dal/security"
 import { connectToDatabase } from "@/lib/db"
 import { parseEnvFile, serializeEnvFile } from "@/lib/dotenv"
 import { slugify } from "@/lib/format"
 import { EnvironmentVariable } from "@/lib/models/environment-variable"
 import type { ImportPreview } from "@/lib/types"
+import type { Unlock } from "@/lib/unlock"
 import {
   createVariableSchema,
   envKeySchema,
@@ -23,7 +24,6 @@ import {
   MAX_IMPORT_BYTES,
   MAX_VALUE_LENGTH,
   objectIdSchema,
-  passcodeAttemptSchema,
   secretAccessSchema,
   updateVariableSchema,
 } from "@/lib/validation"
@@ -182,13 +182,13 @@ export async function deleteVariable(input: {
 }
 
 /**
- * Returns ONE decrypted value after the passcode has been verified on the
- * server. Used for reveal, copy and unlocking a value inside the edit form.
+ * Returns ONE decrypted value after the PIN or Touch ID has been verified on
+ * the server. Used for reveal, copy and unlocking a value in the edit form.
  */
 export async function accessSecret(input: {
   variableId: string
-  passcode: string
   purpose: "reveal" | "copy" | "edit"
+  unlock: Unlock
 }): Promise<ActionResult<{ value: string }>> {
   const user = await requireUser()
 
@@ -196,7 +196,7 @@ export async function accessSecret(input: {
   if (!parsed.success) {
     return fail({ code: "VALIDATION", message: "Enter your passcode." })
   }
-  const { variableId, passcode, purpose } = parsed.data
+  const { variableId, purpose } = parsed.data
 
   try {
     const variable = await findOwnedVariable(user.id, variableId, true)
@@ -204,7 +204,7 @@ export async function accessSecret(input: {
     const project = await getOwnedProject(user.id, variable.projectId.toString())
     if (!project) return fail(PROJECT_NOT_FOUND)
 
-    const check = await verifyUserPasscode(user.id, passcode, {
+    const check = await verifyUnlock(user, input.unlock, {
       projectId: project._id.toString(),
       metadata: { key: variable.key, projectName: project.name, purpose },
     })
@@ -228,27 +228,22 @@ export async function accessSecret(input: {
 }
 
 /**
- * Builds the project's .env after the passcode has been verified, either to
- * download as a file or to copy to the clipboard in one go.
+ * Builds the project's .env after the PIN or Touch ID has been verified,
+ * either to download as a file or to copy to the clipboard in one go.
  */
 export async function exportEnv(input: {
   projectId: string
-  passcode: string
+  unlock: Unlock
   mode?: "download" | "clipboard"
 }): Promise<ActionResult<{ fileName: string; content: string; count: number }>> {
   const user = await requireUser()
   const mode = input.mode === "clipboard" ? "clipboard" : "download"
 
-  const passcode = passcodeAttemptSchema.safeParse(input.passcode)
-  if (!passcode.success) {
-    return fail({ code: "VALIDATION", message: "Enter your passcode." })
-  }
-
   try {
     const project = await getOwnedProject(user.id, input.projectId)
     if (!project) return fail(PROJECT_NOT_FOUND)
 
-    const check = await verifyUserPasscode(user.id, passcode.data, {
+    const check = await verifyUnlock(user, input.unlock, {
       projectId: project._id.toString(),
       metadata: {
         projectName: project.name,

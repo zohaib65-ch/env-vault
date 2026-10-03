@@ -73,9 +73,28 @@ export const updateVariableSchema = z.object({
   value: envValueSchema.nullable(),
 })
 
+// Shape check only; the signature itself is verified with SimpleWebAuthn.
+const passkeyAssertionSchema = z.object({
+  id: z.string().min(1).max(1024),
+  rawId: z.string().min(1).max(1024),
+  type: z.literal("public-key"),
+  response: z.object({
+    clientDataJSON: z.string().min(1).max(8192),
+    authenticatorData: z.string().min(1).max(8192),
+    signature: z.string().min(1).max(4096),
+    userHandle: z.string().max(1024).optional(),
+  }),
+  clientExtensionResults: z.record(z.string(), z.unknown()).default({}),
+  authenticatorAttachment: z.enum(["platform", "cross-platform"]).optional(),
+})
+
+export const unlockSchema = z.union([
+  z.object({ passcode: passcodeAttemptSchema }),
+  z.object({ passkey: passkeyAssertionSchema }),
+])
+
 export const secretAccessSchema = z.object({
   variableId: objectIdSchema,
-  passcode: passcodeAttemptSchema,
   purpose: z.enum(["reveal", "copy", "edit"]),
 })
 

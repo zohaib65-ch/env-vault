@@ -16,6 +16,9 @@ export const ACTIVITY_ACTIONS = [
   "passcode.failed",
   "passcode.locked",
   "session.revoked",
+  "passkey.added",
+  "passkey.removed",
+  "passkey.failed",
 ] as const
 
 export type ActivityAction = (typeof ACTIVITY_ACTIONS)[number]

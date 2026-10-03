@@ -1,16 +1,22 @@
 "use client"
 
 import { useRouter } from "next/navigation"
+import { createContext, useContext, useEffect, useRef, useState } from "react"
 import {
-  createContext,
-  useCallback,
-  useContext,
-  useEffect,
-  useRef,
-  useState,
-} from "react"
-import { LockKeyhole, ShieldAlert, TimerIcon, XCircle } from "lucide-react"
+  startAuthentication,
+  WebAuthnAbortService,
+  type PublicKeyCredentialRequestOptionsJSON,
+} from "@simplewebauthn/browser"
+import {
+  Fingerprint,
+  LockKeyhole,
+  ShieldAlert,
+  TimerIcon,
+  XCircle,
+} from "lucide-react"
 
+import { startPasskeyAuthentication } from "@/app/actions/passkeys"
+import { PinInput } from "@/components/shared/pin-input"
 import { Button } from "@/components/ui/button"
 import {
   Dialog,
@@ -21,8 +27,14 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog"
 import { Spinner } from "@/components/ui/spinner"
-import { PinInput } from "@/components/shared/pin-input"
-import type { ActionResult } from "@/lib/action-result"
+import type { ActionError, ActionResult } from "@/lib/action-result"
+import {
+  isWebAuthnError,
+  rememberTouchIdCredential,
+  touchIdAvailable,
+  touchIdCredentialOnThisDevice,
+} from "@/lib/touch-id"
+import type { Unlock } from "@/lib/unlock"
 import { cn } from "@/lib/utils"
 import { PASSCODE_LENGTH } from "@/lib/validation"
 
@@ -30,8 +42,13 @@ type PasscodeRequest<T> = {
   title?: string
   description: React.ReactNode
   confirmLabel?: string
-  /** Called synchronously from the submit handler with the typed passcode. */
-  run: (passcode: string) => Promise<ActionResult<T>>
+  /** Require the PIN even when fingerprint unlock is set up. */
+  pinOnly?: boolean
+  /**
+   * Called synchronously from the click or keystroke with the user's proof
+   * (PIN or fingerprint), so clipboard writes keep the user gesture.
+   */
+  run: (unlock: Promise<Unlock>) => Promise<ActionResult<T>>
 }
 
 type ActiveRequest = PasscodeRequest<unknown> & {
@@ -42,6 +59,8 @@ type PasscodeContextValue = {
   /** Resolves with the action's data, or `null` if the user cancels. */
   requestPasscode: <T>(request: PasscodeRequest<T>) => Promise<T | null>
 }
+
+type FingerprintState = "off" | "preparing" | "ready" | "prompting"
 
 const PasscodeContext = createContext<PasscodeContextValue | null>(null)
 
@@ -71,9 +90,22 @@ function formatCountdown(seconds: number) {
     : `${minutes}:${secs}`
 }
 
-export function PasscodeProvider({ children }: { children: React.ReactNode }) {
+export function PasscodeProvider({
+  children,
+  fingerprintEnabled,
+}: {
+  children: React.ReactNode
+  /** The user has registered fingerprint unlock on at least one device. */
+  fingerprintEnabled: boolean
+}) {
   const router = useRouter()
   const inputRef = useRef<HTMLInputElement>(null)
+  // Refs hold what async callbacks need, so they never act on a stale dialog.
+  const requestRef = useRef<ActiveRequest | null>(null)
+  const busyRef = useRef(false)
+  const optionsRef = useRef<PublicKeyCredentialRequestOptionsJSON | null>(null)
+  const credentialIdRef = useRef<string | null>(null)
+
   const [request, setRequest] = useState<ActiveRequest | null>(null)
   const [open, setOpen] = useState(false)
   const [passcode, setPasscode] = useState("")
@@ -81,61 +113,143 @@ export function PasscodeProvider({ children }: { children: React.ReactNode }) {
   const [error, setError] = useState<string | null>(null)
   const [lockedUntil, setLockedUntil] = useState<string | null>(null)
   const [shakeKey, setShakeKey] = useState(0)
+  const [fingerprint, setFingerprint] = useState<FingerprintState>("off")
 
   const secondsLocked = useCountdown(lockedUntil)
   const locked = secondsLocked > 0
 
-  const requestPasscode = useCallback(<T,>(next: PasscodeRequest<T>) => {
+  function finish(result: unknown) {
+    const current = requestRef.current
+    requestRef.current = null
+    optionsRef.current = null
+    WebAuthnAbortService.cancelCeremony()
+    current?.resolve(result)
+    setOpen(false)
+    setPasscode("")
+    setFingerprint("off")
+  }
+
+  /** Fetches a one-time challenge so the fingerprint prompt can open instantly. */
+  async function prepareFingerprint(autoStart: boolean) {
+    const current = requestRef.current
+    if (!current || !(await touchIdAvailable())) return
+    if (requestRef.current !== current) return
+    setFingerprint("preparing")
+    const result = await startPasskeyAuthentication().catch(() => null)
+    if (requestRef.current !== current) return
+    if (!result?.ok) {
+      setFingerprint("off")
+      return
+    }
+    optionsRef.current = result.data
+    setFingerprint("ready")
+    if (autoStart && !busyRef.current) unlockWithFingerprint(true)
+  }
+
+  function handleFailure(failure: ActionError) {
+    setPasscode("")
+    if (failure.code === "INVALID_PASSCODE") {
+      setError(
+        failure.remainingAttempts <= 2
+          ? `Incorrect passcode · ${failure.remainingAttempts} ${failure.remainingAttempts === 1 ? "attempt" : "attempts"} left`
+          : "Incorrect passcode"
+      )
+      setShakeKey((key) => key + 1)
+    } else if (failure.code === "LOCKED") {
+      setLockedUntil(failure.lockedUntil)
+      setError(null)
+    } else if (failure.code === "PASSCODE_NOT_SET") {
+      finish(null)
+      router.push("/setup")
+      return
+    } else {
+      setError(failure.message)
+    }
+    requestAnimationFrame(() => inputRef.current?.focus())
+  }
+
+  function attempt(unlock: Promise<Unlock>, automatic = false) {
+    const current = requestRef.current
+    if (!current || busyRef.current) return
+    busyRef.current = true
+    setPending(true)
+    setError(null)
+
+    // `run` starts synchronously so clipboard writes keep the user gesture.
+    current
+      .run(unlock)
+      .then((result) => {
+        if (requestRef.current !== current) return
+        if (result.ok) {
+          if (credentialIdRef.current) rememberTouchIdCredential(credentialIdRef.current)
+          finish(result.data)
+        } else {
+          handleFailure(result.error)
+        }
+      })
+      .catch((cause) => {
+        if (requestRef.current !== current) return
+        if (!isWebAuthnError(cause)) {
+          setError("Network error. Check your connection and try again.")
+        } else if (!automatic) {
+          setError("Fingerprint check was cancelled. Try again, or enter your PIN.")
+        }
+      })
+      .finally(() => {
+        busyRef.current = false
+        credentialIdRef.current = null
+        setPending(false)
+        // Fingerprint challenges are single-use; line up a fresh one.
+        if (requestRef.current === current && !optionsRef.current && !current.pinOnly && fingerprintEnabled) {
+          void prepareFingerprint(false)
+        }
+      })
+  }
+
+  function submitPin(code: string) {
+    if (locked || code.length !== PASSCODE_LENGTH) return
+    attempt(Promise.resolve({ passcode: code }))
+  }
+
+  function unlockWithFingerprint(automatic = false) {
+    const options = optionsRef.current
+    if (!options || busyRef.current || !requestRef.current) return
+    optionsRef.current = null
+    setFingerprint("prompting")
+
+    // Opens the system prompt synchronously (Safari requires the user gesture).
+    const unlock = startAuthentication({ optionsJSON: options }).then(
+      (passkey): Unlock => {
+        credentialIdRef.current = passkey.id
+        return { passkey }
+      }
+    )
+    unlock.catch(() => {}).finally(() => setFingerprint((state) => (state === "prompting" ? "preparing" : state)))
+    attempt(unlock, automatic)
+  }
+
+  function requestPasscode<T>(next: PasscodeRequest<T>) {
     return new Promise<T | null>((resolve) => {
-      setRequest({ ...(next as PasscodeRequest<unknown>), resolve: resolve as (v: unknown) => void })
+      requestRef.current?.resolve(null)
+      const active: ActiveRequest = {
+        ...(next as PasscodeRequest<unknown>),
+        resolve: resolve as (value: unknown) => void,
+      }
+      requestRef.current = active
+      optionsRef.current = null
+      busyRef.current = false
+      setRequest(active)
       setPasscode("")
       setError(null)
       setPending(false)
+      setFingerprint("off")
       setOpen(true)
+
+      if (fingerprintEnabled && !next.pinOnly) {
+        // Start the prompt by itself on a device that has used it before.
+        void prepareFingerprint(touchIdCredentialOnThisDevice() !== null)
+      }
     })
-  }, [])
-
-  function close(result: unknown) {
-    request?.resolve(result)
-    setOpen(false)
-    setPasscode("")
-  }
-
-  function submit(code: string) {
-    if (!request || pending || locked || code.length !== PASSCODE_LENGTH) return
-
-    setPending(true)
-    setError(null)
-    // `run` starts synchronously so clipboard writes keep the user gesture.
-    request
-      .run(code)
-      .then((result) => {
-        if (result.ok) {
-          close(result.data)
-          return
-        }
-        const failure = result.error
-        setPasscode("")
-        if (failure.code === "INVALID_PASSCODE") {
-          setError(
-            failure.remainingAttempts <= 2
-              ? `Incorrect passcode · ${failure.remainingAttempts} ${failure.remainingAttempts === 1 ? "attempt" : "attempts"} left`
-              : "Incorrect passcode"
-          )
-          setShakeKey((key) => key + 1)
-        } else if (failure.code === "LOCKED") {
-          setLockedUntil(failure.lockedUntil)
-          setError(null)
-        } else if (failure.code === "PASSCODE_NOT_SET") {
-          close(null)
-          router.push("/setup")
-        } else {
-          setError(failure.message)
-        }
-        requestAnimationFrame(() => inputRef.current?.focus())
-      })
-      .catch(() => setError("Network error. Check your connection and try again."))
-      .finally(() => setPending(false))
   }
 
   return (
@@ -144,7 +258,7 @@ export function PasscodeProvider({ children }: { children: React.ReactNode }) {
       <Dialog
         open={open}
         onOpenChange={(next) => {
-          if (!next && !pending) close(null)
+          if (!next && !pending) finish(null)
         }}
       >
         <DialogContent
@@ -158,7 +272,7 @@ export function PasscodeProvider({ children }: { children: React.ReactNode }) {
           <form
             onSubmit={(event) => {
               event.preventDefault()
-              submit(passcode)
+              submitPin(passcode)
             }}
             autoComplete="off"
           >
@@ -182,19 +296,45 @@ export function PasscodeProvider({ children }: { children: React.ReactNode }) {
                 </DialogTitle>
                 <DialogDescription className="text-balance">
                   {locked
-                    ? "Too many incorrect attempts. For your security, passcode entry is paused."
+                    ? "Too many incorrect attempts. For your security, PIN entry is paused."
                     : request?.description}
                 </DialogDescription>
               </DialogHeader>
 
-              <div className="relative mt-6 space-y-2.5">
+              <div className="relative mt-6 space-y-4">
+                {fingerprint !== "off" ? (
+                  <>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      className="h-12 w-full gap-2.5 text-[15px]"
+                      onClick={() => unlockWithFingerprint()}
+                      disabled={fingerprint !== "ready" || pending}
+                    >
+                      {fingerprint === "prompting" ? (
+                        <Spinner />
+                      ) : (
+                        <Fingerprint className="size-5 text-brand" />
+                      )}
+                      {fingerprint === "prompting"
+                        ? "Touch the fingerprint sensor…"
+                        : "Unlock with fingerprint"}
+                    </Button>
+                    <div className="flex items-center gap-3 text-xs text-muted-foreground">
+                      <span className="h-px flex-1 bg-border" />
+                      or enter your PIN
+                      <span className="h-px flex-1 bg-border" />
+                    </div>
+                  </>
+                ) : null}
+
                 {locked ? (
                   <div className="flex items-center justify-center gap-2 rounded-lg border border-destructive/30 bg-destructive/10 px-3 py-3 font-mono text-sm text-destructive">
                     <TimerIcon className="size-4" />
                     Try again in {formatCountdown(secondsLocked)}
                   </div>
                 ) : (
-                  <>
+                  <div className="space-y-2.5">
                     <PinInput
                       key={shakeKey}
                       ref={inputRef}
@@ -207,7 +347,7 @@ export function PasscodeProvider({ children }: { children: React.ReactNode }) {
                         if (error) setError(null)
                         // Submitting inside the keystroke's event handler keeps
                         // the user gesture that clipboard writes need.
-                        if (next.length === PASSCODE_LENGTH) submit(next)
+                        if (next.length === PASSCODE_LENGTH) submitPin(next)
                       }}
                       disabled={pending}
                       invalid={Boolean(error)}
@@ -217,30 +357,31 @@ export function PasscodeProvider({ children }: { children: React.ReactNode }) {
                         error && "animate-[shake_0.35s_ease-in-out]"
                       )}
                     />
-                    <p
-                      id="passcode-error"
-                      role="alert"
-                      className={cn(
-                        "flex min-h-5 items-center justify-center gap-1.5 text-sm text-destructive transition-opacity",
-                        error ? "opacity-100" : "opacity-0"
-                      )}
-                    >
-                      {error ? (
-                        <>
-                          <XCircle className="size-4" />
-                          {error}
-                        </>
-                      ) : null}
-                    </p>
-                  </>
+                  </div>
                 )}
+
+                <p
+                  id="passcode-error"
+                  role="alert"
+                  className={cn(
+                    "flex min-h-5 items-center justify-center gap-1.5 text-center text-sm text-destructive transition-opacity",
+                    error ? "opacity-100" : "opacity-0"
+                  )}
+                >
+                  {error ? (
+                    <>
+                      <XCircle className="size-4 shrink-0" />
+                      {error}
+                    </>
+                  ) : null}
+                </p>
               </div>
             </div>
             <DialogFooter className="mx-0 mb-0">
               <Button
                 type="button"
                 variant="outline"
-                onClick={() => close(null)}
+                onClick={() => finish(null)}
                 disabled={pending}
               >
                 Cancel
@@ -249,7 +390,7 @@ export function PasscodeProvider({ children }: { children: React.ReactNode }) {
                 type="submit"
                 disabled={pending || locked || passcode.length !== PASSCODE_LENGTH}
               >
-                {pending ? <Spinner /> : <LockKeyhole />}
+                {pending && fingerprint !== "prompting" ? <Spinner /> : <LockKeyhole />}
                 {request?.confirmLabel ?? "Unlock"}
               </Button>
             </DialogFooter>

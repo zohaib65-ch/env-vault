@@ -9,6 +9,7 @@ export type ActionError =
   | { code: "INVALID_PASSCODE"; message: string; remainingAttempts: number }
   | { code: "LOCKED"; message: string; lockedUntil: string }
   | { code: "PASSCODE_NOT_SET"; message: string }
+  | { code: "PASSKEY_FAILED"; message: string }
   | { code: "SERVER"; message: string }
 
 export type ActionResult<T = null> =

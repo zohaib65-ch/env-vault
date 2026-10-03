@@ -64,17 +64,23 @@ export function ProjectWorkspace({
       title: "Copy all variables",
       description: (
         <>
-          Enter your security passcode to copy all{" "}
+          Confirm it&apos;s you to copy all{" "}
           {pluralize(variables.length, "variable")} from{" "}
           <span className="text-foreground">{project.name}</span> to your clipboard.
         </>
       ),
       confirmLabel: "Copy all",
-      run: (passcode) =>
-        copySecretFromServer(async () => {
-          const result = await exportEnv({ projectId: project.id, passcode, mode: "clipboard" })
-          return result.ok ? { ok: true, data: { value: result.data.content } } : result
-        }),
+      run: (unlock) =>
+        copySecretFromServer(() =>
+          unlock.then(async (proof) => {
+            const result = await exportEnv({
+              projectId: project.id,
+              unlock: proof,
+              mode: "clipboard",
+            })
+            return result.ok ? { ok: true, data: { value: result.data.content } } : result
+          })
+        ),
     })
     if (data) {
       toast.success(`${pluralize(variables.length, "variable")} copied`, {
@@ -88,13 +94,14 @@ export function ProjectWorkspace({
       title: "Download .env",
       description: (
         <>
-          Enter your security passcode to download{" "}
+          Confirm it&apos;s you to download{" "}
           {pluralize(variables.length, "variable")} from{" "}
           <span className="text-foreground">{project.name}</span> as a file.
         </>
       ),
       confirmLabel: "Download",
-      run: (passcode) => exportEnv({ projectId: project.id, passcode }),
+      run: (unlock) =>
+        unlock.then((proof) => exportEnv({ projectId: project.id, unlock: proof })),
     })
     if (data) {
       downloadTextFile(data.fileName, data.content)

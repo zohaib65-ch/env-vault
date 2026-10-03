@@ -2,14 +2,19 @@ import "server-only"
 
 import { Types } from "mongoose"
 
+import type { AuthenticationResponseJSON } from "@simplewebauthn/server"
+
 import { fail, type ActionError } from "@/lib/action-result"
 import type { ActivityMetadata } from "@/lib/activity-types"
+import type { CurrentUser } from "@/lib/auth/session"
+import { verifyPasskeyAssertion } from "@/lib/auth/webauthn"
 import { logActivity } from "@/lib/dal/activity"
 import { connectToDatabase } from "@/lib/db"
 import { SecuritySettings } from "@/lib/models/security-settings"
 import { Session } from "@/lib/models/session"
 import { verifyPasscodeHash } from "@/lib/passcode"
 import type { SecurityStatus } from "@/lib/types"
+import { unlockSchema } from "@/lib/validation"
 
 export const MAX_FAILED_ATTEMPTS = 5
 export const BASE_LOCKOUT_MINUTES = 15
@@ -157,5 +162,41 @@ export async function verifyUserPasscode(
     code: "INVALID_PASSCODE",
     message: "Incorrect passcode",
     remainingAttempts,
+  })
+}
+
+/**
+ * Gate for every action that reveals a secret: accepts the 4-digit PIN (rate
+ * limited above) or a Touch ID assertion signed over a one-time challenge.
+ */
+export async function verifyUnlock(
+  user: CurrentUser,
+  unlock: unknown,
+  audit: { projectId?: string | null; metadata?: ActivityMetadata } = {}
+): Promise<PasscodeCheck> {
+  const parsed = unlockSchema.safeParse(unlock)
+  if (!parsed.success) {
+    return fail({ code: "VALIDATION", message: "Enter your passcode." })
+  }
+
+  if ("passcode" in parsed.data) {
+    return verifyUserPasscode(user.id, parsed.data.passcode, audit)
+  }
+
+  const verified = await verifyPasskeyAssertion(
+    user,
+    parsed.data.passkey as AuthenticationResponseJSON
+  )
+  if (verified) return { ok: true }
+
+  await logActivity({
+    userId: user.id,
+    action: "passkey.failed",
+    projectId: audit.projectId,
+    metadata: audit.metadata,
+  })
+  return fail({
+    code: "PASSKEY_FAILED",
+    message: "Touch ID couldn't be verified. Try again, or enter your PIN.",
   })
 }

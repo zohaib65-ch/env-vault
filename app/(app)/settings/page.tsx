@@ -3,6 +3,7 @@ import {
   Ban,
   Database,
   Fingerprint,
+  ScanFace,
   KeyRound,
   LockKeyhole,
   LogOut,
@@ -15,6 +16,7 @@ import {
 import { GoogleIcon } from "@/components/brand/google-icon"
 import { UserAvatar } from "@/components/layout/user-menu"
 import { ChangePasscodeForm } from "@/components/settings/change-passcode-form"
+import { FingerprintSettings } from "@/components/settings/fingerprint-settings"
 import { LogoutButton } from "@/components/settings/logout-button"
 import { SessionsList } from "@/components/settings/sessions-list"
 import { PageHeader } from "@/components/shared/page-header"
@@ -25,6 +27,7 @@ import {
   getSecurityStatus,
   MAX_FAILED_ATTEMPTS,
 } from "@/lib/dal/security"
+import { listPasskeys } from "@/lib/dal/passkeys"
 import { listSessions } from "@/lib/dal/sessions"
 import { formatDate, formatDateTime } from "@/lib/format"
 
@@ -77,9 +80,10 @@ function Fact({
 
 export default async function SettingsPage() {
   const user = await requireUser()
-  const [status, sessions] = await Promise.all([
+  const [status, sessions, passkeys] = await Promise.all([
     getSecurityStatus(user.id),
     listSessions(user.id, user.sessionId),
+    listPasskeys(user.id),
   ])
 
   return (
@@ -124,6 +128,14 @@ export default async function SettingsPage() {
       </Section>
 
       <Section
+        icon={Fingerprint}
+        title="Fingerprint unlock"
+        description="Use Touch ID instead of typing your PIN to reveal, copy or export. Your fingerprint never leaves your device, and the PIN keeps working as a backup."
+      >
+        <FingerprintSettings passkeys={passkeys} />
+      </Section>
+
+      <Section
         icon={ShieldCheck}
         title="Security information"
         description="How ENV Vault protects your environment variables."
@@ -143,6 +155,15 @@ export default async function SettingsPage() {
             icon={Fingerprint}
             label="Passcode storage"
             value="4-digit PIN · peppered, salted scrypt hash"
+          />
+          <Fact
+            icon={ScanFace}
+            label="Fingerprint unlock"
+            value={
+              passkeys.length
+                ? `WebAuthn passkey on ${passkeys.length} ${passkeys.length === 1 ? "device" : "devices"} · new one-time challenge per unlock`
+                : "Not set up"
+            }
           />
           <Fact
             icon={Ban}

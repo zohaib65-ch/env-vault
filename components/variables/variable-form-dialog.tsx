@@ -130,12 +130,14 @@ export function VariableFormDialog({
     const data = await requestPasscode({
       description: (
         <>
-          Enter your security passcode to edit the value of{" "}
+          Confirm it&apos;s you to edit the value of{" "}
           <code className="font-mono text-foreground">{variable.key}</code>.
         </>
       ),
-      run: (passcode) =>
-        accessSecret({ variableId: variable.id, passcode, purpose: "edit" }),
+      run: (unlock) =>
+        unlock.then((proof) =>
+          accessSecret({ variableId: variable.id, purpose: "edit", unlock: proof })
+        ),
     })
     setUnlocking(false)
     if (data) {

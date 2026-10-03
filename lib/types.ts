@@ -41,3 +41,11 @@ export type ImportPreview = {
   invalidKeys: string[]
   duplicateKeys: string[]
 }
+
+export type PasskeyItem = {
+  id: string
+  credentialId: string
+  name: string
+  createdAt: string
+  lastUsedAt: string | null
+}

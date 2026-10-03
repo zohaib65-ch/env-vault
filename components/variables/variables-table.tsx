@@ -177,13 +177,15 @@ export function VariablesTable({
     const data = await requestPasscode({
       description: (
         <>
-          Enter your security passcode to reveal{" "}
+          Confirm it&apos;s you to reveal{" "}
           <code className="font-mono text-foreground">{variable.key}</code>.
         </>
       ),
       confirmLabel: "Reveal",
-      run: (passcode) =>
-        accessSecret({ variableId: variable.id, passcode, purpose: "reveal" }),
+      run: (unlock) =>
+        unlock.then((proof) =>
+          accessSecret({ variableId: variable.id, purpose: "reveal", unlock: proof })
+        ),
     })
     if (data) {
       const hideAt = revealDeadline()
@@ -204,15 +206,17 @@ export function VariablesTable({
     const data = await requestPasscode({
       description: (
         <>
-          Enter your security passcode to copy{" "}
+          Confirm it&apos;s you to copy{" "}
           <code className="font-mono text-foreground">{variable.key}</code> to your
           clipboard.
         </>
       ),
       confirmLabel: "Copy",
-      run: (passcode) =>
+      run: (unlock) =>
         copySecretFromServer(() =>
-          accessSecret({ variableId: variable.id, passcode, purpose: "copy" })
+          unlock.then((proof) =>
+            accessSecret({ variableId: variable.id, purpose: "copy", unlock: proof })
+          )
         ),
     })
     if (data) {
