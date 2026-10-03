@@ -123,7 +123,7 @@ export function ProjectWorkspace({
 
       <div className="flex flex-col gap-5 lg:flex-row lg:items-start lg:justify-between">
         <div className="flex min-w-0 items-start gap-4">
-          <ProjectAvatar name={project.name} className="size-12 text-base" />
+          <ProjectAvatar name={project.name} className="size-12 text-base" shuffle />
           <div className="min-w-0 space-y-1">
             <h1 className="truncate text-2xl font-semibold tracking-tight">{project.name}</h1>
             {project.description ? (

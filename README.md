@@ -141,3 +141,7 @@ lib/
   dotenv.ts              .env parser/serializer (dotenv-compatible)
 proxy.ts                 Optimistic redirect for signed-out visitors
 ```
+
+## Credits
+
+Project avatars are generated locally with [DiceBear](https://www.dicebear.com): "Fun Emoji" by Davis Uche, "Big Smile" by Ashley Seo and "Adventurer" by Lisa Wischofsky (CC BY 4.0), "Bottts" by Pablo Stanley, and "Thumbs" by DiceBear (CC0).
